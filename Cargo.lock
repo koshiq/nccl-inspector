@@ -512,6 +512,7 @@ dependencies = [
  "env_logger",
  "libbpf-cargo",
  "libbpf-rs",
+ "libc",
  "log",
  "tokio",
 ]
