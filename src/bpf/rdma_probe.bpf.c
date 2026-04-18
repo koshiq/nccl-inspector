@@ -14,12 +14,21 @@ struct rdma_event {
     char  comm[16];
 };
 
+struct qp_owner {
+    __u32 pid;
+    char  comm[16];
+};
+
+// Drop sub-header packets (RoCE ACK / control) from the SEND stream.
+// Real data sends carry >= BTH (12) + payload, practically always >= 64B.
+#define MIN_SEND_BYTES 64
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 4096 * 1024);
 } events SEC(".maps");
 
-// Hash map: qp_num -> send timestamp
+// qp_num -> send timestamp (for latency calculation)
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1024);
@@ -27,7 +36,42 @@ struct {
     __type(value, __u64);
 } inflight SEC(".maps");
 
-// Probe 1: fires on every RDMA packet transmission
+// qp_num -> originating userspace process. Set at post_send time (user
+// context) and read back at xmit/completion where the caller is usually a
+// kworker thread.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u32);
+    __type(value, struct qp_owner);
+} qp_owners SEC(".maps");
+
+static __always_inline void fill_owner(struct rdma_event *e, __u32 qp_num)
+{
+    struct qp_owner *o = bpf_map_lookup_elem(&qp_owners, &qp_num);
+    if (o) {
+        e->pid = o->pid;
+        __builtin_memcpy(e->comm, o->comm, sizeof(e->comm));
+    } else {
+        e->pid = bpf_get_current_pid_tgid() >> 32;
+        bpf_get_current_comm(e->comm, sizeof(e->comm));
+    }
+}
+
+// Probe: userspace calls rxe_post_send via the ib_qp ops table — runs in
+// the caller's task context, so we can attribute the QP to a real process.
+SEC("kprobe/rxe_post_send")
+int BPF_KPROBE(probe_rxe_post_send, struct ib_qp *ibqp)
+{
+    __u32 qp_num = BPF_CORE_READ(ibqp, qp_num);
+    struct qp_owner owner = {};
+    owner.pid = bpf_get_current_pid_tgid() >> 32;
+    bpf_get_current_comm(&owner.comm, sizeof(owner.comm));
+    bpf_map_update_elem(&qp_owners, &qp_num, &owner, BPF_ANY);
+    return 0;
+}
+
+// Probe: fires on every outbound RDMA packet
 SEC("kprobe/rxe_xmit_packet")
 int BPF_KPROBE(probe_rxe_xmit_packet,
                struct ib_qp *qp,
@@ -35,10 +79,15 @@ int BPF_KPROBE(probe_rxe_xmit_packet,
                struct sk_buff *skb)
 {
     __u32 qp_num = BPF_CORE_READ(qp, qp_num);
+    __u32 len    = BPF_CORE_READ(skb, len);
     __u64 ts     = bpf_ktime_get_ns();
 
-    // Store send timestamp for latency calculation
+    // Record send timestamp even for small packets — pairs with CQE latency.
     bpf_map_update_elem(&inflight, &qp_num, &ts, BPF_ANY);
+
+    // Skip bare ACKs / control traffic from the visible event stream.
+    if (len < MIN_SEND_BYTES)
+        return 0;
 
     struct rdma_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
@@ -47,17 +96,16 @@ int BPF_KPROBE(probe_rxe_xmit_packet,
     e->timestamp_ns = ts;
     e->latency_ns   = 0;
     e->qp_num       = qp_num;
-    e->bytes        = BPF_CORE_READ(skb, len);
+    e->bytes        = len;
     e->opcode       = 0;
-    e->pid          = bpf_get_current_pid_tgid() >> 32;
     e->event_type   = 0;
-    bpf_get_current_comm(e->comm, sizeof(e->comm));
+    fill_owner(e, qp_num);
 
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
 
-// Probe 2: fires when a competition is posted to the CQ
+// Probe: fires when a completion is posted to the CQ
 SEC("kprobe/rxe_cq_post")
 int BPF_KPROBE(probe_rxe_cq_post,
                void *cq,
@@ -70,6 +118,8 @@ int BPF_KPROBE(probe_rxe_cq_post,
     __u32 byte_len = 0;
     __u32 opcode   = 0;
 
+    // struct ib_wc layout: opcode @ 12, byte_len @ 20, qp_num @ 28.
+    // (Same first 32 bytes as struct ib_uverbs_wc.)
     bpf_probe_read_kernel(&qp_num,   sizeof(qp_num),   (void *)cqe + 28);
     bpf_probe_read_kernel(&byte_len, sizeof(byte_len), (void *)cqe + 20);
     bpf_probe_read_kernel(&opcode,   sizeof(opcode),   (void *)cqe + 12);
@@ -92,9 +142,8 @@ int BPF_KPROBE(probe_rxe_cq_post,
     e->qp_num       = qp_num;
     e->bytes        = byte_len;
     e->opcode       = opcode;
-    e->pid          = bpf_get_current_pid_tgid() >> 32;
     e->event_type   = 1;
-    bpf_get_current_comm(e->comm, sizeof(e->comm));
+    fill_owner(e, qp_num);
 
     bpf_ringbuf_submit(e, 0);
     return 0;

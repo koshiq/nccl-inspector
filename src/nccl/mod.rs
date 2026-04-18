@@ -4,7 +4,7 @@ use std::os::unix::io::IntoRawFd;
 
 const SHM_NAME: &str = "/dev/shm/nccl_inspector";
 const SHM_CAPACITY: usize = 1024;
-const COMM_MAGIC: u64 = 0xACC11234;
+const COMM_MAGIC: u64 = 0xACC11235;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -20,6 +20,8 @@ pub struct NcclEvent {
     pub algo:         u8,
     pub protocol:     u8,
     pub comm_id:      [u8; 16],
+    pub peer:         i32,
+    pub pid:          u32,
 }
 
 #[repr(C)]
@@ -116,6 +118,8 @@ pub fn event_type_str(t: u8) -> &'static str {
         2 => "reducescatter",
         3 => "broadcast",
         4 => "reduce",
+        5 => "send",
+        6 => "recv",
         _ => "unknown",
     }
 }

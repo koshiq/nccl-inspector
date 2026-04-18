@@ -12,9 +12,11 @@ libbpf-rs = "0.25"
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
-tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+ratatui = "0.28"
+crossterm = "0.28"
+serde_json = "1"
 
 [build-dependencies]
 libbpf-cargo = "0.25"

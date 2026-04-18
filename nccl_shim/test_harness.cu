@@ -57,6 +57,30 @@ int main() {
         printf("  iter %d done\n", i);
     }
 
+    printf("Running 3 reduce iterations (root=0)...\n");
+    for (int i = 0; i < 3; i++) {
+        CHECK_NCCL(ncclReduce(sendbuf, recvbuf, count,
+                               ncclFloat, ncclSum, 0, comm, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+        printf("  iter %d done\n", i);
+    }
+
+    printf("Running 3 broadcast iterations (root=0)...\n");
+    for (int i = 0; i < 3; i++) {
+        CHECK_NCCL(ncclBroadcast(sendbuf, recvbuf, count,
+                                  ncclFloat, 0, comm, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+        printf("  iter %d done\n", i);
+    }
+
+    printf("Running 3 reducescatter iterations...\n");
+    for (int i = 0; i < 3; i++) {
+        CHECK_NCCL(ncclReduceScatter(sendbuf, recvbuf, count,
+                                      ncclFloat, ncclSum, comm, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+        printf("  iter %d done\n", i);
+    }
+
     CHECK_CUDA(cudaFree(sendbuf));
     CHECK_CUDA(cudaFree(recvbuf));
     CHECK_CUDA(cudaStreamDestroy(stream));
